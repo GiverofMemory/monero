@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2020, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -40,7 +40,6 @@
 #include "cryptonote_core/i_core_events.h"
 #include "cryptonote_protocol/cryptonote_protocol_handler_common.h"
 #include "cryptonote_protocol/enums.h"
-#include "storages/portable_storage_template_helper.h"
 #include "common/download.h"
 #include "common/command_line.h"
 #include "tx_pool.h"
@@ -1013,10 +1012,11 @@ namespace cryptonote
       * @brief verify that each ring uses distinct members
       *
       * @param tx the transaction to check
+      * @param hf_version the hard fork version rules to use
       *
       * @return false if any ring uses duplicate members, true otherwise
       */
-     bool check_tx_inputs_ring_members_diff(const transaction& tx) const;
+     bool check_tx_inputs_ring_members_diff(const transaction& tx, const uint8_t hf_version) const;
 
      /**
       * @brief verify that each input key image in a transaction is in
@@ -1034,6 +1034,13 @@ namespace cryptonote
       * @return true
       */
      bool relay_txpool_transactions();
+
+     /**
+      * @brief sends notification of txpool events to subscribers
+      *
+      * @return true on success, false otherwise
+      */
+     bool notify_txpool_event(const epee::span<const cryptonote::blobdata> tx_blobs, epee::span<const crypto::hash> tx_hashes, epee::span<const cryptonote::transaction> txs, const std::vector<bool> &just_broadcasted) const;
 
      /**
       * @brief checks DNS versions
