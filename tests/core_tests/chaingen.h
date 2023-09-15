@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -44,7 +44,7 @@
 #include <boost/functional/hash.hpp>
 
 #include "include_base_utils.h"
-#include "common/boost_serialization_helper.h"
+#include "chaingen_serialization.h"
 #include "common/command_line.h"
 #include "common/threadpool.h"
 
@@ -778,7 +778,7 @@ inline bool do_replay_events_get_core(std::vector<test_event_entry>& events, cry
 
   t_test_class validator;
   bool ret = replay_events_through_core<t_test_class>(c, events, validator);
-  tools::threadpool::getInstance().recycle();
+  tools::threadpool::getInstanceForCompute().recycle();
 //  c.deinit();
   return ret;
 }

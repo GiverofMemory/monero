@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2022, The Monero Project
+# Copyright (c) 2014-2023, The Monero Project
 # 
 # All rights reserved.
 # 
@@ -72,14 +72,8 @@ else ()
   include_directories(SYSTEM "${CMAKE_CURRENT_SOURCE_DIR}/gtest/include")
 endif (GTest_FOUND)
 
-file(COPY
-  data/wallet_9svHk1.keys
-  data/wallet_9svHk1
-  data/outputs
-  data/unsigned_monero_tx
-  data/signed_monero_tx
-  data/sha256sum
-  DESTINATION data)
+message(STATUS "Copying test data directory...")
+file(COPY data DESTINATION .) # Copy data directory from source root to build root
 
 if (CMAKE_BUILD_TYPE STREQUAL "fuzz" OR OSSFUZZ)
   add_subdirectory(fuzz)
@@ -104,8 +98,6 @@ endif()
 if (TREZOR_DEBUG)
   add_subdirectory(trezor)
 endif()
-
-# add_subdirectory(daemon_tests)
 
 set(hash_targets_sources
   hash-target.cpp)

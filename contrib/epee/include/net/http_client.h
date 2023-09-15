@@ -32,7 +32,6 @@
 #include <boost/regex.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/utility/string_ref.hpp>
-//#include <mbstring.h>
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -48,57 +47,13 @@
 #include "net_parse_helpers.h"
 #include "syncobj.h"
 
-//#include "shlwapi.h"
-
-//#pragma comment(lib, "shlwapi.lib")
-
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "net.http"
-
-extern epee::critical_section gregexp_lock;
-
 
 namespace epee
 {
 namespace net_utils
 {
-
-	/*struct url 
-	{
-	public:
-		void parse(const std::string& url_s)
-		{
-			const string prot_end("://");
-			string::const_iterator prot_i = search(url_s.begin(), url_s.end(),
-				prot_end.begin(), prot_end.end());
-			protocol_.reserve(distance(url_s.begin(), prot_i));
-			transform(url_s.begin(), prot_i,
-				back_inserter(protocol_),
-				ptr_fun<int,int>(tolower)); // protocol is icase
-			if( prot_i == url_s.end() )
-				return;
-			advance(prot_i, prot_end.length());
-			string::const_iterator path_i = find(prot_i, url_s.end(), '/');
-			host_.reserve(distance(prot_i, path_i));
-			transform(prot_i, path_i,
-				back_inserter(host_),
-				ptr_fun<int,int>(tolower)); // host is icase
-			string::const_iterator query_i = find(path_i, url_s.end(), '?');
-			path_.assign(path_i, query_i);
-			if( query_i != url_s.end() )
-				++query_i;
-			query_.assign(query_i, url_s.end());
-		}
-
-		std::string protocol_;
-		std::string host_;
-		std::string path_;
-		std::string query_;
-	};*/
-
-
-
-
 	//---------------------------------------------------------------------------
 	namespace http
 	{
@@ -135,7 +90,6 @@ namespace net_utils
 			http_response_info m_response_info;
 			size_t m_len_in_summary;
 			size_t m_len_in_remain;
-			//std::string* m_ptarget_buffer;
 			boost::shared_ptr<i_sub_handler> m_pcontent_encoding_handler;
 			reciev_machine_state m_state;
 			chunked_state m_chunked_state;
@@ -245,8 +199,18 @@ namespace net_utils
 					}
 				}
 
+				// This magic var determines the maximum length for when copying the body message in
+				// memory is faster/more preferable than the round-trip time for one packet
+				constexpr size_t BODY_NO_COPY_CUTOFF = 128 * 1024; // ~262 KB or ~175 packets
+
+				// Maximum expected total headers bytes
+				constexpr size_t HEADER_RESERVE_SIZE = 2048;
+
+				const bool do_copy_body = body.size() <= BODY_NO_COPY_CUTOFF;
+				const size_t req_buff_cap = HEADER_RESERVE_SIZE + (do_copy_body ? body.size() : 0);
+
 				std::string req_buff{};
-				req_buff.reserve(2048);
+				req_buff.reserve(req_buff_cap);
 				req_buff.append(method.data(), method.size()).append(" ").append(uri.data(), uri.size()).append(" HTTP/1.1\r\n");
 				add_field(req_buff, "Host", m_host_buff);
 				add_field(req_buff, "Content-Length", std::to_string(body.size()));
@@ -255,9 +219,7 @@ namespace net_utils
 				for(const auto& field : additional_params)
 					add_field(req_buff, field);
 
-				for (unsigned sends = 0; sends < 2; ++sends)
 				{
-					const std::size_t initial_size = req_buff.size();
 					const auto auth = m_auth.get_auth_field(method, uri);
 					if (auth)
 						add_field(req_buff, *auth);
@@ -265,11 +227,21 @@ namespace net_utils
 					req_buff += "\r\n";
 					//--
 
-					bool res = m_net_client.send(req_buff, timeout);
-					CHECK_AND_ASSERT_MES(res, false, "HTTP_CLIENT: Failed to SEND");
-					if(body.size())
+					if (do_copy_body) // small body
+					{
+						// Copy headers + body together and potentially send one fewer packet
+						req_buff.append(body.data(), body.size());
+						const bool res = m_net_client.send(req_buff, timeout);
+						CHECK_AND_ASSERT_MES(res, false, "HTTP_CLIENT: Failed to SEND");
+					}
+					else // large body
+					{
+						// Send headers and body seperately to avoid copying heavy body message
+						bool res = m_net_client.send(req_buff, timeout);
+						CHECK_AND_ASSERT_MES(res, false, "HTTP_CLIENT: Failed to SEND");
 						res = m_net_client.send(body, timeout);
-					CHECK_AND_ASSERT_MES(res, false, "HTTP_CLIENT: Failed to SEND");
+						CHECK_AND_ASSERT_MES(res, false, "HTTP_CLIENT: Failed to SEND");
+					}
 
 					m_response_info.clear();
 					m_state = reciev_machine_state_header;
@@ -282,28 +254,14 @@ namespace net_utils
 						return true;
 					}
 
-					switch (m_auth.handle_401(m_response_info))
+					if (m_auth.handle_401(m_response_info) == http_client_auth::kParseFailure)
 					{
-					case http_client_auth::kSuccess:
-						break;
-					case http_client_auth::kBadPassword:
-                                                sends = 2;
-						break;
-					default:
-					case http_client_auth::kParseFailure:
 						LOG_ERROR("Bad server response for authentication");
 						return false;
 					}
-					req_buff.resize(initial_size); // rollback for new auth generation
 				}
 				LOG_ERROR("Client has incorrect username/password for server requiring authentication");
 				return false;
-			}
-			//---------------------------------------------------------------------------
-			inline bool invoke_post(const boost::string_ref uri, const std::string& body, std::chrono::milliseconds timeout, const http_response_info** ppresponse_info = NULL, const fields_list& additional_params = fields_list()) override
-			{
-				CRITICAL_REGION_LOCAL(m_lock);
-				return invoke(uri, "POST", body, timeout, ppresponse_info, additional_params);
 			}
 			//---------------------------------------------------------------------------
 			bool test(const std::string &s, std::chrono::milliseconds timeout) // TEST FUNC ONLY

@@ -1,4 +1,4 @@
-// Copyright (c) 2016, Monero Research Labs
+// Copyright (c) 2016-2023, Monero Research Labs
 //
 // Author: Shen Noether <shen.noether@gmx.com>
 //
@@ -97,6 +97,14 @@ namespace rct {
     struct ctkey {
         key dest;
         key mask; //C here if public
+
+        bool operator==(const ctkey &other) const {
+          return (dest == other.dest) && (mask == other.mask);
+        }
+
+        bool operator!=(const ctkey &other) const {
+          return !(*this == other);
+        }
     };
     typedef std::vector<ctkey> ctkeyV;
     typedef std::vector<ctkeyV> ctkeyM;

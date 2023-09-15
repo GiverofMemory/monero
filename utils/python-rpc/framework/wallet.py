@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022, The Monero Project
+# Copyright (c) 2018-2023, The Monero Project
 
 # 
 # All rights reserved.
@@ -297,7 +297,7 @@ class Wallet(object):
         }
         return self.rpc.send_json_rpc_request(query_key)
 
-    def restore_deterministic_wallet(self, seed = '', seed_offset = '', filename = '', restore_height = 0, password = '', language = '', autosave_current = True):
+    def restore_deterministic_wallet(self, seed = '', seed_offset = '', filename = '', restore_height = 0, password = '', language = '', autosave_current = True, enable_multisig_experimental = False):
         restore_deterministic_wallet = {
             'method': 'restore_deterministic_wallet',
             'params' : {
@@ -308,6 +308,7 @@ class Wallet(object):
                 'password': password,
                 'language': language,
                 'autosave_current': autosave_current,
+                'enable_multisig_experimental': enable_multisig_experimental
             },
             'jsonrpc': '2.0', 
             'id': '0'
@@ -524,12 +525,13 @@ class Wallet(object):
         }
         return self.rpc.send_json_rpc_request(finalize_multisig)
 
-    def exchange_multisig_keys(self, multisig_info, password = ''):
+    def exchange_multisig_keys(self, multisig_info, password = '', force_update_use_with_caution = False):
         exchange_multisig_keys = {
             'method': 'exchange_multisig_keys',
             'params' : {
                 'multisig_info': multisig_info,
                 'password': password,
+                'force_update_use_with_caution': force_update_use_with_caution,
             },
             'jsonrpc': '2.0', 
             'id': '0'
@@ -763,10 +765,13 @@ class Wallet(object):
         }
         return self.rpc.send_json_rpc_request(get_languages)
 
-    def export_outputs(self):
+    def export_outputs(self, all = False, start = 0, count = 0xffffffff):
         export_outputs = {
             'method': 'export_outputs',
             'params': {
+                'all': all,
+                'start': start,
+                'count': count,
             },
             'jsonrpc': '2.0', 
             'id': '0'

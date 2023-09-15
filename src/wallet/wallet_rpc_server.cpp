@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -60,6 +60,7 @@ using namespace epee;
 #define MONERO_DEFAULT_LOG_CATEGORY "wallet.rpc"
 
 #define DEFAULT_AUTO_REFRESH_PERIOD 20 // seconds
+#define REFRESH_INFICATIVE_BLOCK_CHUNK_SIZE 256    // just to split refresh in separate calls to play nicer with other threads
 
 #define CHECK_MULTISIG_ENABLED() \
   do \
@@ -79,6 +80,7 @@ namespace
   const command_line::arg_descriptor<bool> arg_restricted = {"restricted-rpc", "Restricts to view-only commands", false};
   const command_line::arg_descriptor<std::string> arg_wallet_dir = {"wallet-dir", "Directory for newly created wallets"};
   const command_line::arg_descriptor<bool> arg_prompt_for_password = {"prompt-for-password", "Prompts for password when not provided", false};
+  const command_line::arg_descriptor<bool> arg_no_initial_sync = {"no-initial-sync", "Skips the initial sync before listening for connections", false};
 
   constexpr const char default_rpc_username[] = "monero";
 
@@ -149,12 +151,17 @@ namespace tools
         return true;
       if (boost::posix_time::microsec_clock::universal_time() < m_last_auto_refresh_time + boost::posix_time::seconds(m_auto_refresh_period))
         return true;
+      uint64_t blocks_fetched = 0;
       try {
-        if (m_wallet) m_wallet->refresh(m_wallet->is_trusted_daemon());
+        bool received_money = false;
+        if (m_wallet) m_wallet->refresh(m_wallet->is_trusted_daemon(), 0, blocks_fetched, received_money, true, true, REFRESH_INFICATIVE_BLOCK_CHUNK_SIZE);
       } catch (const std::exception& ex) {
         LOG_ERROR("Exception at while refreshing, what=" << ex.what());
       }
-      m_last_auto_refresh_time = boost::posix_time::microsec_clock::universal_time();
+      // if we got the max amount of blocks, do not set the last refresh time, we did only part of the refresh and will
+      // continue asap, and only set the last refresh time once the refresh is actually finished
+      if (blocks_fetched < REFRESH_INFICATIVE_BLOCK_CHUNK_SIZE)
+        m_last_auto_refresh_time = boost::posix_time::microsec_clock::universal_time();
       return true;
     }, 1000);
     m_net_server.add_idle_handler([this](){
@@ -397,7 +404,6 @@ namespace tools
     bool is_failed = pd.m_state == tools::wallet2::unconfirmed_transfer_details::failed;
     entry.txid = string_tools::pod_to_hex(txid);
     entry.payment_id = string_tools::pod_to_hex(pd.m_payment_id);
-    entry.payment_id = string_tools::pod_to_hex(pd.m_payment_id);
     if (entry.payment_id.substr(16).find_first_not_of('0') == std::string::npos)
       entry.payment_id = entry.payment_id.substr(0,16);
     entry.height = 0;
@@ -577,9 +583,9 @@ namespace tools
     if (!m_wallet) return not_open(er);
     try
     {
-      if (req.count < 1 || req.count > 64) {
+      if (req.count < 1 || req.count > 65536) {
         er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
-        er.message = "Count must be between 1 and 64.";
+        er.message = "Count must be between 1 and 65536.";
         return false;
       }
 
@@ -2792,7 +2798,7 @@ namespace tools
 
     try
     {
-      res.outputs_data_hex = epee::string_tools::buff_to_hex_nodelimer(m_wallet->export_outputs_to_str(req.all));
+      res.outputs_data_hex = epee::string_tools::buff_to_hex_nodelimer(m_wallet->export_outputs_to_str(req.all, req.start, req.count));
     }
     catch (const std::exception &e)
     {
@@ -3167,7 +3173,7 @@ namespace tools
           return false;
       }
 
-      std::vector<crypto::hash> txids;
+      std::unordered_set<crypto::hash> txids;
       std::list<std::string>::const_iterator i = req.txids.begin();
       while (i != req.txids.end())
       {
@@ -3180,11 +3186,15 @@ namespace tools
           }
 
           crypto::hash txid = *reinterpret_cast<const crypto::hash*>(txid_blob.data());
-          txids.push_back(txid);
+          txids.insert(txid);
       }
 
       try {
           m_wallet->scan_tx(txids);
+      }  catch (const tools::error::wont_reprocess_recent_txs_via_untrusted_daemon &e) {
+          er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
+          er.message = e.what() + std::string(". Either connect to a trusted daemon or rescan the chain.");
+          return false;
       } catch (const std::exception &e) {
           handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR);
           return false;
@@ -3530,7 +3540,6 @@ namespace tools
         cryptonote::print_money(e.tx_amount() + e.fee())  %
         cryptonote::print_money(e.tx_amount()) %
         cryptonote::print_money(e.fee())).str();
-      er.message = e.what();
     }
     catch (const tools::error::not_enough_outs_to_mix& e)
     {
@@ -3802,7 +3811,7 @@ namespace tools
     std::string old_language;
 
     // check the given seed
-    {
+    if (!req.enable_multisig_experimental) {
       if (!crypto::ElectrumWords::words_to_bytes(req.seed, recovery_key, old_language))
       {
         er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
@@ -3825,6 +3834,13 @@ namespace tools
 
     // process seed_offset if given
     {
+      if (req.enable_multisig_experimental && !req.seed_offset.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
+        er.message = "Multisig seeds are not compatible with seed offsets";
+        return false;
+      }
+
       if (!req.seed_offset.empty())
       {
         recovery_key = cryptonote::decrypt_key(recovery_key, req.seed_offset);
@@ -3888,7 +3904,27 @@ namespace tools
     crypto::secret_key recovery_val;
     try
     {
-      recovery_val = wal->generate(wallet_file, std::move(rc.second).password(), recovery_key, true, false, false);
+      if (req.enable_multisig_experimental)
+      {
+        // Parse multisig seed into raw multisig data
+        epee::wipeable_string multisig_data;
+        multisig_data.resize(req.seed.size() / 2);
+        if (!epee::from_hex::to_buffer(epee::to_mut_byte_span(multisig_data), req.seed))
+        {
+          er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
+          er.message = "Multisig seed not represented as hexadecimal string";
+          return false;
+        }
+
+        // Generate multisig wallet
+        wal->generate(wallet_file, std::move(rc.second).password(), multisig_data, false);
+        wal->enable_multisig(true);
+      }
+      else
+      {
+        // Generate normal wallet
+        recovery_val = wal->generate(wallet_file, std::move(rc.second).password(), recovery_key, true, false, false);
+      }
       MINFO("Wallet has been restored.\n");
     }
     catch (const std::exception &e)
@@ -3899,7 +3935,7 @@ namespace tools
 
     // // Convert the secret key back to seed
     epee::wipeable_string electrum_words;
-    if (!crypto::ElectrumWords::bytes_to_words(recovery_val, electrum_words, mnemonic_language))
+    if (!req.enable_multisig_experimental && !crypto::ElectrumWords::bytes_to_words(recovery_val, electrum_words, mnemonic_language))
     {
       er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
       er.message = "Failed to encode seed";
@@ -4146,13 +4182,6 @@ namespace tools
       er.message = "This wallet is not multisig";
       return false;
     }
-
-    if (ready)
-    {
-      er.code = WALLET_RPC_ERROR_CODE_ALREADY_MULTISIG;
-      er.message = "This wallet is multisig, and already finalized";
-      return false;
-    }
     CHECK_MULTISIG_ENABLED();
 
     if (req.multisig_info.size() + 1 < total)
@@ -4164,7 +4193,7 @@ namespace tools
 
     try
     {
-      res.multisig_info = m_wallet->exchange_multisig_keys(req.password, req.multisig_info);
+      res.multisig_info = m_wallet->exchange_multisig_keys(req.password, req.multisig_info, req.force_update_use_with_caution);
       m_wallet->multisig(&ready);
       if (ready)
       {
@@ -4519,7 +4548,6 @@ public:
 
       const auto arg_wallet_file = wallet_args::arg_wallet_file();
       const auto arg_from_json = wallet_args::arg_generate_from_json();
-      const auto arg_rpc_client_secret_key = wallet_args::arg_rpc_client_secret_key();
       const auto arg_password_file = wallet_args::arg_password_file();
 
       const auto wallet_file = command_line::get_arg(vm, arg_wallet_file);
@@ -4528,6 +4556,7 @@ public:
       const auto password_file = command_line::get_arg(vm, arg_password_file);
       const auto prompt_for_password = command_line::get_arg(vm, arg_prompt_for_password);
       const auto password_prompt = prompt_for_password ? password_prompter : nullptr;
+      const auto no_initial_sync = command_line::get_arg(vm, arg_no_initial_sync);
 
       if(!wallet_file.empty() && !from_json.empty())
       {
@@ -4576,17 +4605,6 @@ public:
         return false;
       }
 
-      if (!command_line::is_arg_defaulted(vm, arg_rpc_client_secret_key))
-      {
-        crypto::secret_key client_secret_key;
-        if (!epee::string_tools::hex_to_pod(command_line::get_arg(vm, arg_rpc_client_secret_key), client_secret_key))
-        {
-          MERROR(arg_rpc_client_secret_key.name << ": RPC client secret key should be 32 byte in hex format");
-          return false;
-        }
-        wal->set_rpc_client_secret_key(client_secret_key);
-      }
-
       bool quit = false;
       tools::signal_handler::install([&wal, &quit](int) {
         assert(wal);
@@ -4596,7 +4614,8 @@ public:
 
       try
       {
-        wal->refresh(wal->is_trusted_daemon());
+        if (!no_initial_sync)
+          wal->refresh(wal->is_trusted_daemon());
       }
       catch (const std::exception& e)
       {
@@ -4692,7 +4711,6 @@ int main(int argc, char** argv) {
 
   const auto arg_wallet_file = wallet_args::arg_wallet_file();
   const auto arg_from_json = wallet_args::arg_generate_from_json();
-  const auto arg_rpc_client_secret_key = wallet_args::arg_rpc_client_secret_key();
 
   po::options_description hidden_options("Hidden");
 
@@ -4706,7 +4724,8 @@ int main(int argc, char** argv) {
   command_line::add_arg(desc_params, arg_from_json);
   command_line::add_arg(desc_params, arg_wallet_dir);
   command_line::add_arg(desc_params, arg_prompt_for_password);
-  command_line::add_arg(desc_params, arg_rpc_client_secret_key);
+  command_line::add_arg(desc_params, arg_no_initial_sync);
+  command_line::add_arg(hidden_options, daemonizer::arg_non_interactive);
 
   daemonizer::init_options(hidden_options, desc_params);
   desc_params.add(hidden_options);

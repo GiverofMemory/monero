@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 //
 // All rights reserved.
 //
@@ -82,6 +82,7 @@
 using namespace epee;
 
 #include "miner.h"
+#include "crypto/hash.h"
 
 
 extern "C" void slow_hash_allocate_state();
@@ -436,7 +437,6 @@ namespace cryptonote
   {
     m_stop = true;
   }
-  extern "C" void rx_stop_mining(void);
   //-----------------------------------------------------------------------------------------------------
   bool miner::stop()
   {
@@ -469,7 +469,6 @@ namespace cryptonote
     MINFO("Mining has been stopped, " << m_threads.size() << " finished" );
     m_threads.clear();
     m_threads_autodetect.clear();
-    rx_stop_mining();
     return true;
   }
   //-----------------------------------------------------------------------------------------------------
@@ -524,6 +523,8 @@ namespace cryptonote
   bool miner::worker_thread()
   {
     const uint32_t th_local_index = m_thread_index++; // atomically increment, getting value before increment
+    bool rx_set = false;
+
     MLOG_SET_THREAD_NAME(std::string("[miner ") + std::to_string(th_local_index) + "]");
     MGINFO("Miner thread was started ["<< th_local_index << "]");
     uint32_t nonce = m_starter_nonce + th_local_index;
@@ -574,6 +575,13 @@ namespace cryptonote
 
       b.nonce = nonce;
       crypto::hash h;
+
+      if ((b.major_version >= RX_BLOCK_VERSION) && !rx_set)
+      {
+        crypto::rx_set_miner_thread(th_local_index, tools::get_max_concurrency());
+        rx_set = true;
+      }
+
       m_gbh(b, height, NULL, tools::get_max_concurrency(), h);
 
       if(check_hash(h, local_diff))

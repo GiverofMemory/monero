@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 //
 // All rights reserved.
 //
@@ -30,6 +30,8 @@
 // check local first (in the event of static or in-source compilation of libunbound)
 #include "unbound.h"
 
+#include <deque>
+#include <set>
 #include <stdlib.h>
 #include "include_base_utils.h"
 #include "common/threadpool.h"
@@ -326,11 +328,6 @@ std::vector<std::string> DNSResolver::get_record(const std::string& url, int rec
   dnssec_available = false;
   dnssec_valid = false;
 
-  if (!check_address_syntax(url.c_str()))
-  {
-    return addresses;
-  }
-
   // destructor takes care of cleanup
   ub_result_ptr result;
 
@@ -342,7 +339,10 @@ std::vector<std::string> DNSResolver::get_record(const std::string& url, int rec
     dnssec_available = (result->secure || result->bogus);
     dnssec_valid = result->secure && !result->bogus;
     if (dnssec_available && !dnssec_valid)
+    {
       MWARNING("Invalid DNSSEC " << get_record_name(record_type) << " record signature for " << url << ": " << result->why_bogus);
+      MWARNING("Possibly your DNS service is problematic. You can have monerod use an alternate via env variable DNS_PUBLIC. Example: DNS_PUBLIC=tcp://9.9.9.9");
+    }
     if (result->havedata)
     {
       for (size_t i=0; result->data[i] != NULL; i++)
@@ -411,16 +411,6 @@ DNSResolver& DNSResolver::instance()
 DNSResolver DNSResolver::create()
 {
   return DNSResolver();
-}
-
-bool DNSResolver::check_address_syntax(const char *addr) const
-{
-  // if string doesn't contain a dot, we won't consider it a url for now.
-  if (strchr(addr,'.') == NULL)
-  {
-    return false;
-  }
-  return true;
 }
 
 namespace dns_utils
@@ -520,7 +510,7 @@ bool load_txt_records_from_dns(std::vector<std::string> &good_records, const std
 
   // send all requests in parallel
   std::deque<bool> avail(dns_urls.size(), false), valid(dns_urls.size(), false);
-  tools::threadpool& tpool = tools::threadpool::getInstance();
+  tools::threadpool& tpool = tools::threadpool::getInstanceForIO();
   tools::threadpool::waiter waiter(tpool);
   for (size_t n = 0; n < dns_urls.size(); ++n)
   {

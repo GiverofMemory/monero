@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 //
 // All rights reserved.
 //
@@ -42,8 +42,7 @@
 #include "cryptonote_protocol/enums.h"
 #include "common/download.h"
 #include "common/command_line.h"
-#include "tx_pool.h"
-#include "blockchain.h"
+#include "blockchain_and_pool.h"
 #include "cryptonote_basic/miner.h"
 #include "cryptonote_basic/connection_context.h"
 #include "warnings.h"
@@ -437,6 +436,13 @@ namespace cryptonote
      void set_cryptonote_protocol(i_cryptonote_protocol* pprotocol);
 
      /**
+      * @copydoc Blockchain::get_checkpoints
+      *
+      * @note see Blockchain::get_checkpoints()
+      */
+     const checkpoints& get_checkpoints() const;
+
+     /**
       * @copydoc Blockchain::set_checkpoints
       *
       * @note see Blockchain::set_checkpoints()
@@ -503,6 +509,23 @@ namespace cryptonote
      bool get_pool_transaction_hashes(std::vector<crypto::hash>& txs, bool include_sensitive_txes = false) const;
 
      /**
+      * @copydoc tx_memory_pool::get_pool_transactions_info
+      * @param include_sensitive_txes include private transactions
+      *
+      * @note see tx_memory_pool::get_pool_transactions_info
+      */
+     bool get_pool_transactions_info(const std::vector<crypto::hash>& txids, std::vector<std::pair<crypto::hash, tx_memory_pool::tx_details>>& txs, bool include_sensitive_txes = false) const;
+
+     /**
+      * @copydoc tx_memory_pool::get_pool_info
+      * @param include_sensitive_txes include private transactions
+      * @param max_tx_count max allowed added_txs in response
+      *
+      * @note see tx_memory_pool::get_pool_info
+      */
+     bool get_pool_info(time_t start_time, bool include_sensitive_txes, size_t max_tx_count, std::vector<std::pair<crypto::hash, tx_memory_pool::tx_details>>& added_txs, std::vector<crypto::hash>& remaining_added_txids, std::vector<crypto::hash>& removed_txs, bool& incremental) const;
+
+    /**
       * @copydoc tx_memory_pool::get_transactions
       * @param include_sensitive_txes include private transactions
       *
@@ -1074,8 +1097,9 @@ namespace cryptonote
 
      uint64_t m_test_drop_download_height = 0; //!< height under which to drop incoming blocks, if doing so
 
-     tx_memory_pool m_mempool; //!< transaction pool instance
-     Blockchain m_blockchain_storage; //!< Blockchain instance
+     BlockchainAndPool m_bap; //! Contains owned instances of Blockchain and tx_memory_pool
+     tx_memory_pool& m_mempool; //!< ref to transaction pool instance in m_bap
+     Blockchain& m_blockchain_storage; //!< ref to Blockchain instance in m_bap
 
      i_cryptonote_protocol* m_pprotocol; //!< cryptonote protocol instance
 

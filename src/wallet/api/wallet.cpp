@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 //
 // All rights reserved.
 //
@@ -63,8 +63,8 @@ namespace {
     static const int    MAX_REFRESH_INTERVAL_MILLIS = 1000 * 60 * 1;
     // Default refresh interval when connected to remote node
     static const int    DEFAULT_REMOTE_NODE_REFRESH_INTERVAL_MILLIS = 1000 * 10;
-    // Connection timeout 30 sec
-    static const int    DEFAULT_CONNECTION_TIMEOUT_MILLIS = 1000 * 30;
+    // Connection timeout 20 sec
+    static const int    DEFAULT_CONNECTION_TIMEOUT_MILLIS = 1000 * 20;
 
     std::string get_default_ringdb_path(cryptonote::network_type nettype)
     {
@@ -207,38 +207,6 @@ struct Wallet2CallbackImpl : public tools::i_wallet2_callback
     virtual void on_skip_transaction(uint64_t height, const crypto::hash &txid, const cryptonote::transaction& tx)
     {
         // TODO;
-    }
-
-    // Light wallet callbacks
-    virtual void on_lw_new_block(uint64_t height)
-    {
-      if (m_listener) {
-        m_listener->newBlock(height);
-      }
-    }
-
-    virtual void on_lw_money_received(uint64_t height, const crypto::hash &txid, uint64_t amount)
-    {
-      if (m_listener) {
-        std::string tx_hash =  epee::string_tools::pod_to_hex(txid);
-        m_listener->moneyReceived(tx_hash, amount);
-      }
-    }
-
-    virtual void on_lw_unconfirmed_money_received(uint64_t height, const crypto::hash &txid, uint64_t amount)
-    {
-      if (m_listener) {
-        std::string tx_hash =  epee::string_tools::pod_to_hex(txid);
-        m_listener->unconfirmedMoneyReceived(tx_hash, amount);
-      }
-    }
-
-    virtual void on_lw_money_spent(uint64_t height, const crypto::hash &txid, uint64_t amount)
-    {
-      if (m_listener) {
-        std::string tx_hash =  epee::string_tools::pod_to_hex(txid);
-        m_listener->moneySpent(tx_hash, amount);
-      }
     }
 
     virtual void on_device_button_request(uint64_t code)
@@ -535,7 +503,7 @@ bool WalletImpl::createWatchOnly(const std::string &path, const std::string &pas
         view_wallet->generate(path, password, address, viewkey);
 
         // Export/Import outputs
-        auto outputs = m_wallet->export_outputs();
+        auto outputs = m_wallet->export_outputs(true/*all*/);
         view_wallet->import_outputs(outputs);
 
         // Copy scanned blockchain
@@ -553,7 +521,7 @@ bool WalletImpl::createWatchOnly(const std::string &path, const std::string &pas
 
         // Export/Import key images
         // We already know the spent status from the outputs we exported, thus no need to check them again
-        auto key_images = m_wallet->export_key_images();
+        auto key_images = m_wallet->export_key_images(true/*all*/);
         uint64_t spent = 0;
         uint64_t unspent = 0;
         view_wallet->import_key_images(key_images.second, key_images.first, spent, unspent, false);
@@ -950,40 +918,9 @@ string WalletImpl::keysFilename() const
 bool WalletImpl::init(const std::string &daemon_address, uint64_t upper_transaction_size_limit, const std::string &daemon_username, const std::string &daemon_password, bool use_ssl, bool lightWallet, const std::string &proxy_address)
 {
     clearStatus();
-    m_wallet->set_light_wallet(lightWallet);
     if(daemon_username != "")
         m_daemon_login.emplace(daemon_username, daemon_password);
     return doInit(daemon_address, proxy_address, upper_transaction_size_limit, use_ssl);
-}
-
-bool WalletImpl::lightWalletLogin(bool &isNewWallet) const
-{
-  return m_wallet->light_wallet_login(isNewWallet);
-}
-
-bool WalletImpl::lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status)
-{
-  try
-  {
-    tools::COMMAND_RPC_IMPORT_WALLET_REQUEST::response response;
-    if(!m_wallet->light_wallet_import_wallet_request(response)){
-      setStatusError(tr("Failed to send import wallet request"));
-      return false;
-    }
-    fee = response.import_fee;
-    payment_id = response.payment_id;
-    new_request = response.new_request;
-    request_fulfilled = response.request_fulfilled;
-    payment_address = response.payment_address;
-    status = response.status;
-  }
-  catch (const std::exception &e)
-  {
-    LOG_ERROR("Error sending import wallet request: " << e.what());
-    setStatusError(e.what());
-    return false;
-  }
-  return true;
 }
 
 void WalletImpl::setRefreshFromBlockHeight(uint64_t refresh_from_block_height)
@@ -1018,9 +955,6 @@ uint64_t WalletImpl::unlockedBalance(uint32_t accountIndex) const
 
 uint64_t WalletImpl::blockChainHeight() const
 {
-    if(m_wallet->light_wallet()) {
-        return m_wallet->get_light_wallet_scanned_block_height();
-    }
     return m_wallet->get_blockchain_current_height();
 }
 uint64_t WalletImpl::approximateBlockChainHeight() const
@@ -1035,9 +969,6 @@ uint64_t WalletImpl::estimateBlockChainHeight() const
 
 uint64_t WalletImpl::daemonBlockChainHeight() const
 {
-    if(m_wallet->light_wallet()) {
-        return m_wallet->get_light_wallet_scanned_block_height();
-    }
     if (!m_is_connected)
         return 0;
     std::string err;
@@ -1054,9 +985,6 @@ uint64_t WalletImpl::daemonBlockChainHeight() const
 
 uint64_t WalletImpl::daemonBlockChainTargetHeight() const
 {
-    if(m_wallet->light_wallet()) {
-        return m_wallet->get_light_wallet_blockchain_height();
-    }
     if (!m_is_connected)
         return 0;
     std::string err;
@@ -1146,8 +1074,8 @@ UnsignedTransaction *WalletImpl::loadUnsignedTx(const std::string &unsigned_file
   
   // Check tx data and construct confirmation message
   std::string extra_message;
-  if (!transaction->m_unsigned_tx_set.transfers.second.empty())
-    extra_message = (boost::format("%u outputs to import. ") % (unsigned)transaction->m_unsigned_tx_set.transfers.second.size()).str();
+  if (!std::get<2>(transaction->m_unsigned_tx_set.transfers).empty())
+    extra_message = (boost::format("%u outputs to import. ") % (unsigned)std::get<2>(transaction->m_unsigned_tx_set.transfers).size()).str();
   transaction->checkLoadedTx([&transaction](){return transaction->m_unsigned_tx_set.txes.size();}, [&transaction](size_t n)->const tools::wallet2::tx_construction_data&{return transaction->m_unsigned_tx_set.txes[n];}, extra_message);
   setStatus(transaction->status(), transaction->errorString());
     
@@ -1302,11 +1230,15 @@ bool WalletImpl::scanTransactions(const std::vector<std::string> &txids)
         }
         txids_u.insert(txid);
     }
-    std::vector<crypto::hash> txids_v(txids_u.begin(), txids_u.end());
 
     try
     {
-        m_wallet->scan_tx(txids_v);
+        m_wallet->scan_tx(txids_u);
+    }
+    catch (const tools::error::wont_reprocess_recent_txs_via_untrusted_daemon &e)
+    {
+        setStatusError(e.what());
+        return false;
     }
     catch (const std::exception &e)
     {
@@ -1396,12 +1328,12 @@ string WalletImpl::makeMultisig(const vector<string>& info, const uint32_t thres
     return string();
 }
 
-std::string WalletImpl::exchangeMultisigKeys(const std::vector<std::string> &info) {
+std::string WalletImpl::exchangeMultisigKeys(const std::vector<std::string> &info, const bool force_update_use_with_caution /*= false*/) {
     try {
         clearStatus();
         checkMultisigWalletNotReady(m_wallet);
 
-        return m_wallet->exchange_multisig_keys(epee::wipeable_string(m_password), info);
+        return m_wallet->exchange_multisig_keys(epee::wipeable_string(m_password), info, force_update_use_with_caution);
     } catch (const exception& e) {
         LOG_ERROR("Error on exchanging multisig keys: " << e.what());
         setStatusError(string(tr("Failed to exchange multisig keys: ")) + e.what());
@@ -1782,7 +1714,7 @@ uint64_t WalletImpl::estimateTransactionFee(const std::vector<std::pair<std::str
         m_wallet->use_fork_rules(HF_VERSION_CLSAG, 0),
         m_wallet->use_fork_rules(HF_VERSION_BULLETPROOF_PLUS, 0),
         m_wallet->use_fork_rules(HF_VERSION_VIEW_TAGS, 0),
-        m_wallet->get_base_fee(),
+        m_wallet->get_base_fee(priority),
         m_wallet->get_fee_quantization_mask());
 }
 
@@ -2173,11 +2105,16 @@ bool WalletImpl::connectToDaemon()
 Wallet::ConnectionStatus WalletImpl::connected() const
 {
     uint32_t version = 0;
-    m_is_connected = m_wallet->check_connection(&version, NULL, DEFAULT_CONNECTION_TIMEOUT_MILLIS);
+    bool wallet_is_outdated = false, daemon_is_outdated = false;
+    m_is_connected = m_wallet->check_connection(&version, NULL, DEFAULT_CONNECTION_TIMEOUT_MILLIS, &wallet_is_outdated, &daemon_is_outdated);
     if (!m_is_connected)
-        return Wallet::ConnectionStatus_Disconnected;
-    // Version check is not implemented in light wallets nodes/wallets
-    if (!m_wallet->light_wallet() && (version >> 16) != CORE_RPC_VERSION_MAJOR)
+    {
+        if (wallet_is_outdated || daemon_is_outdated)
+            return Wallet::ConnectionStatus_WrongVersion;
+        else
+            return Wallet::ConnectionStatus_Disconnected;
+    }
+    if ((version >> 16) != CORE_RPC_VERSION_MAJOR)
         return Wallet::ConnectionStatus_WrongVersion;
     return Wallet::ConnectionStatus_Connected;
 }
@@ -2271,7 +2208,7 @@ void WalletImpl::doRefresh()
         LOG_PRINT_L3(__FUNCTION__ << ": doRefresh, rescan = "<<rescan);
         // Syncing daemon and refreshing wallet simultaneously is very resource intensive.
         // Disable refresh if wallet is disconnected or daemon isn't synced.
-        if (m_wallet->light_wallet() || daemonSynced()) {
+        if (daemonSynced()) {
             if(rescan)
                 m_wallet->rescan_blockchain(false);
             m_wallet->refresh(trustedDaemon());
@@ -2362,7 +2299,6 @@ bool WalletImpl::doInit(const string &daemon_address, const std::string &proxy_a
 
     // in case new wallet, this will force fast-refresh (pulling hashes instead of blocks)
     // If daemon isn't synced a calculated block height will be used instead
-    //TODO: Handle light wallet scenario where block height = 0.
     if (isNewWallet() && daemonSynced()) {
         LOG_PRINT_L2(__FUNCTION__ << ":New Wallet - fast refresh until " << daemonBlockChainHeight());
         m_wallet->set_refresh_from_block_height(daemonBlockChainHeight());

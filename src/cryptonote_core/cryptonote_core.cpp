@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2022, The Monero Project
+// Copyright (c) 2014-2023, The Monero Project
 //
 // All rights reserved.
 //
@@ -173,11 +173,6 @@ namespace cryptonote
   , "Check for new versions of monero: [disabled|notify|download|update]"
   , "notify"
   };
-  static const command_line::arg_descriptor<bool> arg_fluffy_blocks  = {
-    "fluffy-blocks"
-  , "Relay blocks as fluffy blocks (obsolete, now default)"
-  , true
-  };
   static const command_line::arg_descriptor<bool> arg_no_fluffy_blocks  = {
     "no-fluffy-blocks"
   , "Relay blocks as normal blocks"
@@ -226,8 +221,9 @@ namespace cryptonote
 
   //-----------------------------------------------------------------------------------------------
   core::core(i_cryptonote_protocol* pprotocol):
-              m_mempool(m_blockchain_storage),
-              m_blockchain_storage(m_mempool),
+              m_bap(),
+              m_mempool(m_bap.tx_pool),
+              m_blockchain_storage(m_bap.blockchain),
               m_miner(this, [this](const cryptonote::block &b, uint64_t height, const crypto::hash *seed_hash, unsigned int threads, crypto::hash &hash) {
                 return cryptonote::get_block_longhash(&m_blockchain_storage, b, hash, height, seed_hash, threads);
               }),
@@ -252,6 +248,10 @@ namespace cryptonote
       m_pprotocol = &m_protocol_stub;
   }
   //-----------------------------------------------------------------------------------
+  const checkpoints& core::get_checkpoints() const
+  {
+    return m_blockchain_storage.get_checkpoints();
+  }
   void core::set_checkpoints(checkpoints&& chk_pts)
   {
     m_blockchain_storage.set_checkpoints(std::move(chk_pts));
@@ -336,7 +336,6 @@ namespace cryptonote
     command_line::add_arg(desc, arg_show_time_stats);
     command_line::add_arg(desc, arg_block_sync_size);
     command_line::add_arg(desc, arg_check_updates);
-    command_line::add_arg(desc, arg_fluffy_blocks);
     command_line::add_arg(desc, arg_no_fluffy_blocks);
     command_line::add_arg(desc, arg_test_dbg_lock_sleep);
     command_line::add_arg(desc, arg_offline);
@@ -388,9 +387,6 @@ namespace cryptonote
     m_fluffy_blocks_enabled = !get_arg(vm, arg_no_fluffy_blocks);
     m_offline = get_arg(vm, arg_offline);
     m_disable_dns_checkpoints = get_arg(vm, arg_disable_dns_checkpoints);
-
-    if (!command_line::is_arg_defaulted(vm, arg_fluffy_blocks))
-      MWARNING(arg_fluffy_blocks.name << " is obsolete, it is now default");
 
     if (command_line::get_arg(vm, arg_test_drop_download) == true)
       test_drop_download();
@@ -572,7 +568,11 @@ namespace cryptonote
         else if(options[0] == "fastest")
         {
           db_flags = DBF_FASTEST;
+#ifdef _WIN32
           sync_threshold = 1000; // default to fastest:async:1000
+#else
+          sync_threshold = 100000; // default to fastest:async:100000
+#endif
           sync_mode = db_sync_mode_is_default ? db_defaultsync : db_async;
         }
         else
@@ -1009,7 +1009,7 @@ namespace cryptonote
 
     CRITICAL_REGION_LOCAL(m_incoming_tx_lock);
 
-    tools::threadpool& tpool = tools::threadpool::getInstance();
+    tools::threadpool& tpool = tools::threadpool::getInstanceForCompute();
     tools::threadpool::waiter waiter(tpool);
     epee::span<tx_blob_entry>::const_iterator it = tx_blobs.begin();
     for (size_t i = 0; i < tx_blobs.size(); i++, ++it) {
@@ -1095,7 +1095,7 @@ namespace cryptonote
       else if(tvc[i].m_verifivation_impossible)
       {MERROR_VER("Transaction verification impossible: " << results[i].hash);}
 
-      if(tvc[i].m_added_to_pool)
+      if(tvc[i].m_added_to_pool && results[i].tx.extra.size() <= MAX_TX_EXTRA_SIZE)
       {
         MDEBUG("tx added: " << results[i].hash);
         valid_events = true;
@@ -1559,7 +1559,8 @@ namespace cryptonote
       return false;
     }
     m_blockchain_storage.add_new_block(b, bvc);
-    cleanup_handle_incoming_blocks(true);
+    const bool force_sync = m_nettype != FAKECHAIN;
+    cleanup_handle_incoming_blocks(force_sync);
     //anyway - update miner template
     update_miner_block_template();
     m_miner.resume();
@@ -1652,10 +1653,6 @@ namespace cryptonote
     if (((size_t)-1) <= 0xffffffff && block_blob.size() >= 0x3fffffff)
       MWARNING("This block's size is " << block_blob.size() << ", closing on the 32 bit limit");
 
-    // load json & DNS checkpoints every 10min/hour respectively,
-    // and verify them with respect to what blocks we already have
-    CHECK_AND_ASSERT_MES(update_checkpoints(), false, "One or more checkpoints loaded from json or dns conflicted with existing checkpoints.");
-
     block lb;
     if (!b)
     {
@@ -1727,6 +1724,11 @@ namespace cryptonote
     return true;
   }
   //-----------------------------------------------------------------------------------------------
+  bool core::get_pool_transactions_info(const std::vector<crypto::hash>& txids, std::vector<std::pair<crypto::hash, tx_memory_pool::tx_details>>& txs, bool include_sensitive_txes) const
+  {
+    return m_mempool.get_transactions_info(txids, txs, include_sensitive_txes);
+  }
+  //-----------------------------------------------------------------------------------------------
   bool core::get_pool_transactions(std::vector<transaction>& txs, bool include_sensitive_data) const
   {
     m_mempool.get_transactions(txs, include_sensitive_data);
@@ -1737,6 +1739,11 @@ namespace cryptonote
   {
     m_mempool.get_transaction_hashes(txs, include_sensitive_data);
     return true;
+  }
+  //-----------------------------------------------------------------------------------------------
+  bool core::get_pool_info(time_t start_time, bool include_sensitive_txes, size_t max_tx_count, std::vector<std::pair<crypto::hash, tx_memory_pool::tx_details>>& added_txs, std::vector<crypto::hash>& remaining_added_txids, std::vector<crypto::hash>& removed_txs, bool& incremental) const
+  {
+    return m_mempool.get_pool_info(start_time, include_sensitive_txes, max_tx_count, added_txs, remaining_added_txids, removed_txs, incremental);
   }
   //-----------------------------------------------------------------------------------------------
   bool core::get_pool_transaction_stats(struct txpool_stats& stats, bool include_sensitive_data) const
