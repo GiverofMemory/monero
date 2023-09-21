@@ -1,3 +1,4 @@
+May move to [Bitbucket](https://bitbucket.org/naturevault/) or [Gitlab](https://gitlab.com/giverofmemory/) due to mandatory 2FA here.
 # Monero
 
 Copyright (c) 2014-2023, The Monero Project
